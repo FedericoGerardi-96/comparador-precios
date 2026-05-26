@@ -1,0 +1,42 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Producto {
+  id        String   @id @default(uuid())
+  ean       String   @unique
+  nombre    String
+  marca     String
+  categoria String
+  imagenUrl String?
+  precios   Precio[]
+  createdAt DateTime @default(now())
+}
+
+model Supermercado {
+  id      String   @id // 'coto', 'carrefour', 'dia'
+  nombre  String
+  logoUrl String?
+  precios Precio[]
+}
+
+model Precio {
+  id             String       @id @default(uuid())
+  precio         Float
+  productoId     String
+  supermercadoId String
+  producto       Producto     @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  supermercado   Supermercado @relation(fields: [supermercadoId], references: [id])
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([productoId, supermercadoId]) // Un precio por supermercado por producto
+}
