@@ -7,8 +7,6 @@ generator client {
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
 model Producto {
@@ -32,11 +30,16 @@ model Supermercado {
 model Precio {
   id             String       @id @default(uuid())
   precio         Float
+  fecha          DateTime     @default(now()) // La clave: guarda el día y la hora de este precio
+  
   productoId     String
   supermercadoId String
+  
   producto       Producto     @relation(fields: [productoId], references: [id], onDelete: Cascade)
   supermercado   Supermercado @relation(fields: [supermercadoId], references: [id])
-  updatedAt      DateTime     @updatedAt
+}
 
-  @@unique([productoId, supermercadoId]) // Un precio por supermercado por producto
+model BusquedaSemilla {
+  id     String @id @default(uuid())
+  texto  String @unique // Acá se guardará "leche entera", "galletitas oreo", etc.
 }

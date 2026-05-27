@@ -1,109 +1,100 @@
-import { PrismaClient } from "@prisma/client";
+import { chromium } from "playwright";
+import { prisma } from "../lib/db";
+import { scrapeCotoProduct } from "@/util/scrapeCotoProduct";
 
-const prisma = new PrismaClient();
+async function syncCotoNavegacionReal() {
+  console.log("=== INICIANDO SINCRONIZACIÓN DIARIA (Simulación de Usuario) ===");
+  const startTime = Date.now();
 
-async function syncCoto() {
-  console.log("Iniciando sincronización con Coto...");
-  try {
-    // Primero nos aseguramos de que existe el supermercado Coto
-    await prisma.supermercado.upsert({
-      where: { id: "coto" },
-      update: {},
-      create: {
-        id: "coto",
-        nombre: "Coto",
-        logoUrl: "https://www.coto.com.ar/logo.png"
-      }
-    });
+  // Cargamos el listado de semillas guardadas por usuarios o el fallback inicial
+  const semillasDb = await prisma.busquedaSemilla.findMany();
 
-    // Simularemos la sincronización trayendo la oferta por defecto
-    const targetUrl = `https://ac.cnstrc.com/v1/search/oferta?key=key_r6xzz4IAoTWcipni&num_results_per_page=100&pre_filter_expression=%7B%22name%22:%22store_availability%22,%22value%22:%22200%22%7D&c=cio-fe-web-coto-3.4.2`;
+  const keywordsAProcesar = semillasDb.length > 0
+    ? semillasDb.map(s => s.texto)
+    : ["leche entera la serenisima 1l", "yerba playadito 1kg"];
+
+  // Asegurar que exista la sucursal de Coto
+  await prisma.supermercado.upsert({
+    where: { id: "coto" },
+    update: {},
+    create: { id: "coto", nombre: "Coto Digital", logoUrl: "https://www.cotodigital3.com.ar/images/logo.png" }
+  });
+
+  // Lanzamos el navegador UNA sola vez
+  const browser = await chromium.launch({ 
+    headless: true, // Ponelo en false localmente si querés debuggear visualmente
+    args: [
+      "--disable-blink-features=AutomationControlled", // Evita flags de Selenium/Playwright
+      "--no-sandbox",
+      "--disable-setuid-sandbox"
+    ]
+  });
+
+  // Creamos un único contexto persistente para todo el proceso de sincronización
+  const context = await browser.newContext({
+    viewport: { width: 1366, height: 768 },
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    locale: "es-AR",
+    timezoneId: "America/Argentina/Buenos_Aires"
+  });
+
+  for (const keyword of keywordsAProcesar) {
+    console.log(`\n⏳ Sincronizando catálogo para: "${keyword}"...`);
     
-    const response = await fetch(targetUrl, {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-      }
-    });
+    // Abrimos un TAB (página) específico para esta keyword
+    const page = await context.newPage();
+    try {
+      const data = await scrapeCotoProduct(page, keyword);
 
-    if (!response.ok) {
-      throw new Error(`Error HTTP: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const results = data.response?.results || [];
-
-    console.log(`Se encontraron ${results.length} productos. Guardando en la base de datos...`);
-
-    let count = 0;
-    for (const item of results) {
-      const itemData = item.data || {};
-      const ean = itemData.id || item.id;
-      if (!ean) continue;
-
-      const nombre = item.value || itemData.name || "Producto sin nombre";
-      const marca = itemData.brand || itemData.product_brand || "Genérica";
-
-      let finalPrice = 0;
-      if (itemData.product_list_price) {
-        finalPrice = typeof itemData.product_list_price === "number"
-          ? itemData.product_list_price
-          : parseFloat(itemData.product_list_price) || 0;
-      }
-      if (!finalPrice && Array.isArray(itemData.price) && itemData.price.length > 0) {
-        const storePrice = itemData.price.find((p: any) => p.store === "200") || itemData.price[0];
-        finalPrice = storePrice.listPrice || storePrice.formatPrice || 0;
+      if (!data || data.price === 0 || !data.ean) {
+        console.log(`⚠️ Se salteó el producto "${keyword}" debido a falla en la recolección de datos.`);
+        continue;
       }
 
-      let imageUrl = itemData.image_url || "";
-      if (imageUrl && imageUrl.startsWith("//")) imageUrl = `https:${imageUrl}`;
-      else if (imageUrl && imageUrl.startsWith("/")) imageUrl = `https://api.coto.com.ar${imageUrl}`;
-
-      const producto = await prisma.producto.upsert({
-        where: { ean: String(ean) },
-        update: {
-          nombre,
-          marca,
-          imagenUrl: imageUrl,
-        },
+      // Guardamos la definición general del producto
+      const productoDb = await prisma.producto.upsert({
+        where: { ean: data.ean },
+        update: { nombre: data.name, imagenUrl: data.image },
         create: {
-          ean: String(ean),
-          nombre,
-          marca,
-          categoria: "Almacén",
-          imagenUrl: imageUrl,
+          ean: data.ean,
+          nombre: data.name,
+          marca: data.name.split(" ")[0],
+          categoria: data.category,
+          imagenUrl: data.image,
         }
       });
 
-      if (finalPrice > 0) {
-        // Upsert precio
-        await prisma.precio.upsert({
-          where: {
-            productoId_supermercadoId: {
-              productoId: producto.id,
-              supermercadoId: "coto"
-            }
-          },
-          update: {
-            precio: finalPrice
-          },
-          create: {
-            productoId: producto.id,
-            supermercadoId: "coto",
-            precio: finalPrice
-          }
-        });
-      }
-      count++;
+      // Insertamos el precio actual en la base de datos temporal
+      await prisma.precio.create({
+        data: {
+          precio: data.price,
+          productoId: productoDb.id,
+          supermercadoId: "coto"
+        }
+      });
+
+      console.log(`✅ Registro exitoso: [${data.ean}] ${data.name} -> $${data.price}`);
+
+    } catch (err: any) {
+      console.error(`❌ Ocurrió un error inesperado al procesar la keyword "${keyword}":`, err.message);
+    } finally {
+      // ANCLA DE SEGURIDAD: Cerramos únicamente el TAB actual para liberar memoria.
+      // El navegador y el contexto siguen vivos para la próxima keyword del bucle.
+      await page.close();
     }
 
-    console.log(`Sincronización finalizada. ${count} productos procesados.`);
-  } catch (error) {
-    console.error("Error durante la sincronización:", error);
-  } finally {
-    await prisma.$disconnect();
+    // Pequeño retardo cortés entre búsquedas
+    await new Promise(resolve => setTimeout(resolve, 2000));
   }
+
+  // Cerramos todo al concluir por completo
+  await context.close();
+  await browser.close();
+  
+  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+  console.log(`\n=== PROCESO TERMINADO EN ${duration} SEGUNDOS ===`);
 }
 
-syncCoto();
+syncCotoNavegacionReal()
+  .catch((e) => console.error(e))
+  .finally(async () => await prisma.$disconnect());

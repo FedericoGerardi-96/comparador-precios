@@ -9,9 +9,9 @@ export async function GET(request: Request) {
         const productosMapeados = await getCotoProducts(query);
         return NextResponse.json(productosMapeados);
     } catch (error: any) {
-        console.error("Error en la API de Coto:", error);
+        console.error("Error al obtener productos desde la base de datos:", error);
         return NextResponse.json(
-            { error: "Error de conexión interna con el servidor de Coto", details: error.message },
+            { error: "Error de conexión interna con la base de datos de Supabase", details: error.message },
             { status: 500 }
         );
     }
